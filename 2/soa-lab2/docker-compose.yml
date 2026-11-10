@@ -1,0 +1,92 @@
+services:
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul-discovery
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - microservices-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    networks:
+      - microservices-net
+
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - user-service
+      - nlp-service
+      - calendar-service
+      - notification-service
+    networks:
+      - microservices-net
+
+  user-service:
+    build: ./user_service
+    environment:
+      - CONSUL_HOST=consul
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  nlp-service:
+    build: ./nlp_service
+    environment:
+      - CONSUL_HOST=consul
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  calendar-service:
+    build: ./calendar_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  notification-service:
+    build: ./notification_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge
