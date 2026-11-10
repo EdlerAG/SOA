@@ -1,0 +1,14 @@
+# Python / Docker / OS
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.db
+.DS_Store
+Thumbs.db
+
+# Word temp files
+~$*
+
+# Методички викладача (в репо зберігаються лише власні роботи)
+ЛР*.docx
