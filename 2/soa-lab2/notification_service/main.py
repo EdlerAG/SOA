@@ -4,20 +4,19 @@ import time
 import socket
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 import httpx
 import pika
 from fastapi import FastAPI
 
 SERVICE_NAME = "notification-service"
-INSTANCE_ID = socket.gethostname()
-SERVICE_ID = f"{SERVICE_NAME}-{INSTANCE_ID}"
+HOST_ID = socket.gethostname()
+CONSUL_ID = f"{SERVICE_NAME}-{HOST_ID}"
 CONSUL_URL = f"http://{os.getenv('CONSUL_HOST', 'consul')}:8500"
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 QUEUE_NAME = "calendar_events_queue"
 DB_PATH = os.getenv("DB_PATH", "notifications.db")
-
-app = FastAPI(title="Notification Service")
 
 
 def init_db():
@@ -37,26 +36,33 @@ def init_db():
         """)
 
 
-def register_service():
-    payload = {
-        "ID": SERVICE_ID,
+def register_in_consul():
+    body = {
+        "ID": CONSUL_ID,
         "Name": SERVICE_NAME,
-        "Address": INSTANCE_ID,
+        "Address": HOST_ID,
         "Port": 8000,
         "Check": {
-            "HTTP": f"http://{INSTANCE_ID}:8000/health",
+            "HTTP": f"http://{HOST_ID}:8000/health",
             "Interval": "10s",
-            "Timeout": "5s"
-        }
+            "Timeout": "5s",
+        },
     }
     for _ in range(10):
         try:
-            r = httpx.put(f"{CONSUL_URL}/v1/agent/service/register", json=payload, timeout=3.0)
-            if r.status_code == 200:
-                print(f"[Consul] Зареєстровано {SERVICE_ID}", flush=True)
+            res = httpx.put(f"{CONSUL_URL}/v1/agent/service/register", json=body, timeout=3.0)
+            if res.status_code == 200:
+                print(f"[Consul] {CONSUL_ID} registered", flush=True)
                 return
-        except Exception:
+        except httpx.HTTPError:
             time.sleep(2)
+
+
+def deregister_from_consul():
+    try:
+        httpx.put(f"{CONSUL_URL}/v1/agent/service/deregister/{CONSUL_ID}", timeout=2.0)
+    except httpx.HTTPError:
+        pass
 
 
 def consume_loop():
@@ -66,7 +72,7 @@ def consume_loop():
             ch = conn.channel()
             ch.queue_declare(queue=QUEUE_NAME, durable=True)
 
-            def on_message(ch, method, properties, body):
+            def on_message(channel, method, properties, body):
                 data = json.loads(body.decode("utf-8"))
                 user = data["user"]
                 priority = data.get("priority", "normal")
@@ -78,39 +84,36 @@ def consume_loop():
                         """INSERT INTO notifications
                            (event_id, action, channel, recipient, priority, text, processed_by, created_at)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (data["event_id"], data["action"], user["channel"], user["contact"], priority, text, INSTANCE_ID, created_at)
+                        (data["event_id"], data["action"], user["channel"], user["contact"], priority, text, HOST_ID, created_at),
                     )
 
                 print(f"[Notification -> {user['channel']} ({user['contact']})] {text}", flush=True)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                channel.basic_ack(delivery_tag=method.delivery_tag)
 
             ch.basic_qos(prefetch_count=1)
             ch.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message)
-            print(f"[RabbitMQ] Очікування повідомлень у {QUEUE_NAME}...", flush=True)
+            print(f"[RabbitMQ] Слухаємо чергу {QUEUE_NAME}...", flush=True)
             ch.start_consuming()
         except Exception as e:
-            print(f"[RabbitMQ] Повторне підключення через 4с ({e})", flush=True)
+            print(f"[RabbitMQ] Очікування підключення ({e})", flush=True)
             time.sleep(4)
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     init_db()
-    register_service()
+    register_in_consul()
     threading.Thread(target=consume_loop, daemon=True).start()
+    yield
+    deregister_from_consul()
 
 
-@app.on_event("shutdown")
-def shutdown():
-    try:
-        httpx.put(f"{CONSUL_URL}/v1/agent/service/deregister/{SERVICE_ID}", timeout=2.0)
-    except Exception:
-        pass
+app = FastAPI(title="Notification Service", lifespan=lifespan)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": SERVICE_NAME, "instance": INSTANCE_ID}
+    return {"status": "ok", "service": SERVICE_NAME, "instance": HOST_ID}
 
 
 @app.get("/notifications")
@@ -121,7 +124,7 @@ def get_notifications():
                FROM notifications ORDER BY id DESC"""
         ).fetchall()
     return {
-        "instance": INSTANCE_ID,
+        "instance": HOST_ID,
         "total": len(rows),
         "notifications": [
             {
@@ -136,5 +139,5 @@ def get_notifications():
                 "created_at": r[8],
             }
             for r in rows
-        ]
+        ],
     }

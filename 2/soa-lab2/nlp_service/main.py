@@ -1,20 +1,22 @@
 import os
 import re
+import json
 import time
 import socket
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 SERVICE_NAME = "nlp-service"
-INSTANCE_ID = socket.gethostname()
-SERVICE_ID = f"{SERVICE_NAME}-{INSTANCE_ID}"
+HOST_ID = socket.gethostname()
+CONSUL_ID = f"{SERVICE_NAME}-{HOST_ID}"
 CONSUL_URL = f"http://{os.getenv('CONSUL_HOST', 'consul')}:8500"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 DB_PATH = os.getenv("DB_PATH", "nlp_history.db")
-
-app = FastAPI(title="NLP Service")
 
 
 class ParseRequest(BaseModel):
@@ -31,97 +33,159 @@ def init_db():
                 parsed_title TEXT,
                 scheduled_at TEXT,
                 priority TEXT,
+                parser_mode TEXT,
                 created_at TEXT
             )
         """)
 
 
-def register_service():
-    payload = {
-        "ID": SERVICE_ID,
+def register_in_consul():
+    body = {
+        "ID": CONSUL_ID,
         "Name": SERVICE_NAME,
-        "Address": INSTANCE_ID,
+        "Address": HOST_ID,
         "Port": 8000,
         "Check": {
-            "HTTP": f"http://{INSTANCE_ID}:8000/health",
+            "HTTP": f"http://{HOST_ID}:8000/health",
             "Interval": "10s",
-            "Timeout": "5s"
-        }
+            "Timeout": "5s",
+        },
     }
     for _ in range(10):
         try:
-            r = httpx.put(f"{CONSUL_URL}/v1/agent/service/register", json=payload, timeout=3.0)
-            if r.status_code == 200:
-                print(f"[Consul] Зареєстровано {SERVICE_ID}", flush=True)
+            res = httpx.put(f"{CONSUL_URL}/v1/agent/service/register", json=body, timeout=3.0)
+            if res.status_code == 200:
+                print(f"[Consul] {CONSUL_ID} registered", flush=True)
                 return
-        except Exception:
+        except httpx.HTTPError:
             time.sleep(2)
 
 
-@app.on_event("startup")
-def startup():
-    init_db()
-    register_service()
-
-
-@app.on_event("shutdown")
-def shutdown():
+def deregister_from_consul():
     try:
-        httpx.put(f"{CONSUL_URL}/v1/agent/service/deregister/{SERVICE_ID}", timeout=2.0)
-    except Exception:
+        httpx.put(f"{CONSUL_URL}/v1/agent/service/deregister/{CONSUL_ID}", timeout=2.0)
+    except httpx.HTTPError:
         pass
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": SERVICE_NAME, "instance": INSTANCE_ID}
+def get_local_now(tz_name: str) -> datetime:
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except ZoneInfoNotFoundError:
+        return datetime.now(ZoneInfo("Europe/Kyiv"))
 
 
-@app.post("/nlp/parse")
-def parse_text(req: ParseRequest):
-    text_lower = req.text.lower()
+def parse_with_gemini(text: str, now_local: datetime) -> dict | None:
+    if not GEMINI_API_KEY:
+        return None
+    prompt = (
+        f"Поточна дата і час користувача: {now_local.strftime('%Y-%m-%d %H:%M')}. "
+        f"Витягни з тексту назву події, дату/час у форматі YYYY-MM-DD HH:MM і priority (high або normal). "
+        f"Поверни тільки JSON з ключами title, scheduled_at, priority. Текст: {text}"
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    try:
+        r = httpx.post(
+            url,
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"},
+            },
+            timeout=6.0,
+        )
+        r.raise_for_status()
+        raw_json = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        data = json.loads(raw_json)
+        if {"title", "scheduled_at"} <= data.keys():
+            return {
+                "title": str(data["title"]).strip() or "Нова подія",
+                "scheduled_at": str(data["scheduled_at"]).strip(),
+                "priority": "high" if data.get("priority") == "high" else "normal",
+            }
+    except Exception as e:
+        print(f"[NLP:{HOST_ID}] Gemini fallback to local rules: {e}", flush=True)
+    return None
 
-    if "післязавтра" in text_lower:
+
+def parse_locally(text: str, now_local: datetime) -> dict:
+    lowered = text.lower()
+    if "післязавтра" in lowered:
         days_offset = 2
-    elif "сьогодні" in text_lower:
+    elif "сьогодні" in lowered:
         days_offset = 0
     else:
         days_offset = 1
 
-    # Підтримуємо формат як 14:30, так і 14.30
-    time_match = re.search(r"(\d{1,2}[:.]\d{2})", req.text)
+    time_match = re.search(r"(\d{1,2}[:.]\d{2})", text)
     event_time = time_match.group(1).replace(".", ":") if time_match else "12:00"
     if len(event_time) == 4:
         event_time = "0" + event_time
 
-    priority = "high" if any(w in text_lower for w in ("терміново", "важливо", "дедлайн")) else "normal"
-
-    target_date = (datetime.now() + timedelta(days=days_offset)).strftime("%Y-%m-%d")
-    scheduled_at = f"{target_date} {event_time}"
+    priority = "high" if any(k in lowered for k in ("терміново", "важливо", "дедлайн")) else "normal"
+    target_date = (now_local + timedelta(days=days_offset)).strftime("%Y-%m-%d")
 
     title = re.sub(
         r"(післязавтра|завтра|сьогодні|(?:о|на)\s*\d{1,2}[:.]\d{2}|нагадай\s*мені\s*про|нагадай\s*про|нагадай|терміново|важливо)",
         "",
-        req.text,
-        flags=re.IGNORECASE
+        text,
+        flags=re.IGNORECASE,
     ).strip(" ,.-!")
 
-    if not title:
-        title = "Нова подія"
+    return {
+        "title": title or "Нова подія",
+        "scheduled_at": f"{target_date} {event_time}",
+        "priority": priority,
+    }
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    register_in_consul()
+    yield
+    deregister_from_consul()
+
+
+app = FastAPI(title="NLP Service", lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": SERVICE_NAME, "instance": HOST_ID}
+
+
+@app.post("/nlp/parse")
+def parse_text(req: ParseRequest):
+    now_local = get_local_now(req.timezone)
+    llm_result = parse_with_gemini(req.text, now_local)
+    if llm_result:
+        parsed, mode = llm_result, "gemini"
+    else:
+        parsed, mode = parse_locally(req.text, now_local), "local_rules"
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO parse_logs (raw_text, parsed_title, scheduled_at, priority, created_at) VALUES (?, ?, ?, ?, ?)",
-            (req.text, title, scheduled_at, priority, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            """INSERT INTO parse_logs
+               (raw_text, parsed_title, scheduled_at, priority, parser_mode, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                req.text,
+                parsed["title"],
+                parsed["scheduled_at"],
+                parsed["priority"],
+                mode,
+                now_local.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
 
-    print(f"[NLP:{INSTANCE_ID}] '{req.text}' -> '{title}' ({scheduled_at}, priority={priority})", flush=True)
+    print(f"[NLP:{HOST_ID}] ({mode}) '{req.text}' -> '{parsed['title']}' [{parsed['scheduled_at']}]", flush=True)
     return {
-        "title": title,
-        "scheduled_at": scheduled_at,
-        "priority": priority,
+        "title": parsed["title"],
+        "scheduled_at": parsed["scheduled_at"],
+        "priority": parsed["priority"],
+        "parser_mode": mode,
         "timezone": req.timezone,
-        "instance": f"{SERVICE_NAME}:{INSTANCE_ID}"
+        "instance": f"{SERVICE_NAME}:{HOST_ID}",
     }
 
 
@@ -129,10 +193,10 @@ def parse_text(req: ParseRequest):
 def get_history():
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT id, raw_text, parsed_title, scheduled_at, priority, created_at FROM parse_logs ORDER BY id DESC"
+            "SELECT id, raw_text, parsed_title, scheduled_at, priority, parser_mode, created_at FROM parse_logs ORDER BY id DESC"
         ).fetchall()
     return {
-        "instance": INSTANCE_ID,
+        "instance": HOST_ID,
         "logs": [
             {
                 "id": r[0],
@@ -140,8 +204,9 @@ def get_history():
                 "title": r[2],
                 "scheduled_at": r[3],
                 "priority": r[4],
-                "created_at": r[5],
+                "parser_mode": r[5],
+                "created_at": r[6],
             }
             for r in rows
-        ]
+        ],
     }

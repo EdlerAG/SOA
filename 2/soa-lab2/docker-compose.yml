@@ -19,7 +19,7 @@ services:
       - "5672:5672"
       - "15672:15672"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 5s
       timeout: 5s
       retries: 15
@@ -55,6 +55,7 @@ services:
     build: ./nlp_service
     environment:
       - CONSUL_HOST=consul
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     depends_on:
       consul:
         condition: service_healthy
