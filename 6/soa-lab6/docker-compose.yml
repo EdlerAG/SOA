@@ -1,0 +1,169 @@
+services:
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul-discovery
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - microservices-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    networks:
+      - microservices-net
+
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - user-service
+      - nlp-service
+      - calendar-service
+      - notification-service
+    networks:
+      - microservices-net
+
+  user-service:
+    build: ./user_service
+    environment:
+      - CONSUL_HOST=consul
+      - LOKI_URL=http://loki:3100/loki/api/v1/push
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  nlp-service:
+    build: ./nlp_service
+    environment:
+      - CONSUL_HOST=consul
+      - LOKI_URL=http://loki:3100/loki/api/v1/push
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  calendar-service:
+    build: ./calendar_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+      - LOKI_URL=http://loki:3100/loki/api/v1/push
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  notification-service:
+    build: ./notification_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+      - LOKI_URL=http://loki:3100/loki/api/v1/push
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: prometheus-monitor
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      - consul
+      - alertmanager
+    networks:
+      - microservices-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - microservices-net
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki-logs
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - microservices-net
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: grafana-ui
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - microservices-net
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-automation
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - WEBHOOK_URL=http://n8n:5678/
+    volumes:
+      - ./n8n:/workflows:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if ! n8n list:workflow | grep -q "SOA Incident Auto-Response"; then
+          n8n import:workflow --input=/workflows/incident_workflow.json || true
+          WID=$$(n8n list:workflow | grep "SOA Incident Auto-Response" | head -n1 | cut -d'|' -f1)
+          [ -n "$$WID" ] && n8n publish:workflow --id="$$WID" || true
+        fi
+        exec /docker-entrypoint.sh
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge

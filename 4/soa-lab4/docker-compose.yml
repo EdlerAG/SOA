@@ -1,0 +1,174 @@
+services:
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul-discovery
+    ports:
+      - "8500:8500"
+    command: "agent -server -bootstrap-expect=1 -ui -client=0.0.0.0"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - microservices-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - microservices-net
+
+  user-service:
+    build: ./user_service
+    environment:
+      - CONSUL_HOST=consul
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  nlp-service:
+    build: ./nlp_service
+    environment:
+      - CONSUL_HOST=consul
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    depends_on:
+      consul:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  calendar-service:
+    build: ./calendar_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+      - SAGA_TIMEOUT_SEC=20
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  notification-service:
+    build: ./notification_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  mcp-server:
+    build: ./mcp_server
+    container_name: mcp-calendar-server
+    ports:
+      - "8090:8090"
+    environment:
+      - GATEWAY_URL=http://api-gateway
+      - MCP_PORT=8090
+    depends_on:
+      - api-gateway
+    networks:
+      - microservices-net
+
+  mcp-inspector:
+    build:
+      context: ./mcp_server
+      dockerfile: Dockerfile.inspector
+    container_name: mcp-inspector-ui
+    ports:
+      - "6274:6274"
+      - "6277:6277"
+    environment:
+      - HOST=0.0.0.0
+      - CLIENT_PORT=6274
+      - SERVER_PORT=6277
+      - DANGEROUSLY_OMIT_AUTH=true
+    depends_on:
+      - mcp-server
+    networks:
+      - microservices-net
+
+  a2a-producer:
+    build:
+      context: ./a2a_agents
+      dockerfile: Dockerfile.producer
+    container_name: a2a-producer-agent
+    ports:
+      - "8091:8091"
+    environment:
+      - GATEWAY_URL=http://api-gateway
+      - AGENT_URL=http://a2a-producer:8091
+    depends_on:
+      - api-gateway
+    networks:
+      - microservices-net
+
+  a2a-consumer:
+    build:
+      context: ./a2a_agents
+      dockerfile: Dockerfile.consumer
+    container_name: a2a-consumer-agent
+    ports:
+      - "8092:8092"
+    environment:
+      - GATEWAY_URL=http://api-gateway
+      - PRODUCER_AGENT_URL=http://a2a-producer:8091
+      - AGENT_URL=http://a2a-consumer:8092
+    depends_on:
+      - api-gateway
+      - a2a-producer
+    networks:
+      - microservices-net
+
+  function-calling-client:
+    build: ./function_calling_client
+    container_name: function-calling-client
+    ports:
+      - "8093:8093"
+    environment:
+      - GATEWAY_URL=http://api-gateway
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.5-flash}
+    depends_on:
+      - api-gateway
+    networks:
+      - microservices-net
+
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - calendar-service
+      - user-service
+      - nlp-service
+      - notification-service
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge

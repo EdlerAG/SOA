@@ -25,7 +25,7 @@ class ParseRequest(BaseModel):
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS parse_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +83,7 @@ def parse_with_gemini(text: str, now_local: datetime) -> dict | None:
         f"Витягни з тексту назву події, дату/час у форматі YYYY-MM-DD HH:MM і priority (high або normal). "
         f"Поверни тільки JSON з ключами title, scheduled_at, priority. Текст: {text}"
     )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     try:
         r = httpx.post(
             url,
@@ -163,7 +163,7 @@ def parse_text(req: ParseRequest):
     else:
         parsed, mode = parse_locally(req.text, now_local), "local_rules"
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.execute(
             """INSERT INTO parse_logs
                (raw_text, parsed_title, scheduled_at, priority, parser_mode, created_at)
@@ -191,7 +191,7 @@ def parse_text(req: ParseRequest):
 
 @app.get("/nlp/history")
 def get_history():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         rows = conn.execute(
             "SELECT id, raw_text, parsed_title, scheduled_at, priority, parser_mode, created_at FROM parse_logs ORDER BY id DESC"
         ).fetchall()

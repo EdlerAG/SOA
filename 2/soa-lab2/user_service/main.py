@@ -22,7 +22,7 @@ class UserPayload(BaseModel):
 
 
 def db_conn():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, timeout=15.0)
 
 
 def init_db():

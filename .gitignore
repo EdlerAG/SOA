@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .venv/
 *.db
+.env
 .DS_Store
 Thumbs.db
 
@@ -12,3 +13,4 @@ Thumbs.db
 
 # Методички викладача (в репо зберігаються лише власні роботи)
 ЛР*.docx
+ЛР*.pdf

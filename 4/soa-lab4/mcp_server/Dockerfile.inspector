@@ -1,0 +1,4 @@
+FROM node:20-alpine
+
+RUN npm install -g @modelcontextprotocol/inspector@0.15.0
+CMD ["mcp-inspector"]

@@ -1,0 +1,54 @@
+{
+  "name": "SOA Incident Auto-Response (Alertmanager -> Ticket)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "prometheus-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Alertmanager Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "prometheus-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst alerts = body.alerts || [];\nreturn alerts.map(a => ({\n  json: {\n    ticket_id: 'INC-' + Math.floor(1000 + Math.random() * 9000),\n    status: a.status,\n    severity: (a.labels && a.labels.severity) || 'warning',\n    alertname: (a.labels && a.labels.alertname) || 'UnknownAlert',\n    service: (a.labels && a.labels.service) || 'unknown-service',\n    summary: (a.annotations && a.annotations.summary) || 'Alert triggered',\n    description: (a.annotations && a.annotations.description) || '',\n    created_at: new Date().toISOString()\n  }\n}));"
+      },
+      "id": "format-node",
+      "name": "Format Incident Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://calendar-service:8000/incidents",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "ticket-node",
+      "name": "Create Incident Ticket (or Slack/Jira Webhook)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 300]
+    }
+  ],
+  "connections": {
+    "Alertmanager Webhook": {
+      "main": [[{ "node": "Format Incident Ticket", "type": "main", "index": 0 }]]
+    },
+    "Format Incident Ticket": {
+      "main": [[{ "node": "Create Incident Ticket (or Slack/Jira Webhook)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1" }
+}

@@ -21,7 +21,6 @@ DB_PATH = os.getenv("DB_PATH", "calendar.db")
 _rr_lock = threading.Lock()
 _rr_index: dict[str, int] = {}
 
-# Простий Circuit Breaker: при 3 збоях поспіль відкривається на 15с
 _cb_state: dict[str, dict] = {}
 CB_FAILURE_THRESHOLD = 3
 CB_OPEN_SECONDS = 15
@@ -40,7 +39,7 @@ class UpdateEventRequest(BaseModel):
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,7 +175,7 @@ def health():
 
 @app.get("/events")
 def list_events():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         rows = conn.execute(
             "SELECT id, user_id, title, scheduled_at, priority, source, status FROM events ORDER BY id DESC"
         ).fetchall()
@@ -199,7 +198,7 @@ def list_events():
 
 @app.get("/events/{event_id}")
 def get_event(event_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         row = conn.execute(
             "SELECT id, user_id, title, scheduled_at, priority, source, status FROM events WHERE id = ?",
             (event_id,),
@@ -238,7 +237,7 @@ def create_event(req: CreateEventRequest):
     trace.append(parsed["instance"])
 
     priority = parsed.get("priority", "normal")
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conflict = conn.execute(
             "SELECT id, title FROM events WHERE user_id = ? AND scheduled_at = ? AND status != 'СКАСОВАНО'",
             (req.user_id, parsed["scheduled_at"]),
@@ -276,7 +275,7 @@ def create_event(req: CreateEventRequest):
 
 @app.put("/events/{event_id}")
 def update_event(event_id: int, req: UpdateEventRequest):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         row = conn.execute("SELECT user_id, priority FROM events WHERE id = ?", (event_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Подію не знайдено")
@@ -312,7 +311,7 @@ def update_event(event_id: int, req: UpdateEventRequest):
 
 @app.delete("/events/{event_id}")
 def delete_event(event_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         cur = conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Подію не знайдено")

@@ -20,7 +20,7 @@ DB_PATH = os.getenv("DB_PATH", "notifications.db")
 
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +79,7 @@ def consume_loop():
                 text = f"[{data['action']}] Подія '{data['title']}' на {data['scheduled_at']}"
                 created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                with sqlite3.connect(DB_PATH) as db:
+                with sqlite3.connect(DB_PATH, timeout=15.0) as db:
                     db.execute(
                         """INSERT INTO notifications
                            (event_id, action, channel, recipient, priority, text, processed_by, created_at)
@@ -118,7 +118,7 @@ def health():
 
 @app.get("/notifications")
 def get_notifications():
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
         rows = conn.execute(
             """SELECT id, event_id, action, channel, recipient, priority, text, processed_by, created_at
                FROM notifications ORDER BY id DESC"""

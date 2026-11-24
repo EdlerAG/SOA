@@ -1,0 +1,12 @@
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 5s
+  group_interval: 15s
+  repeat_interval: 2m
+  receiver: 'n8n-incident-webhook'
+
+receivers:
+  - name: 'n8n-incident-webhook'
+    webhook_configs:
+      - url: 'http://n8n:5678/webhook/prometheus-alert'
+        send_resolved: true

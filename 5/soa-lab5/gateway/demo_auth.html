@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <title>SOA Calendar — OAuth2 Auth Code Flow (Keycloak)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 36px auto; padding: 0 16px; color: #1e293b; }
+    button { padding: 9px 14px; border: 1px solid #cbd5e1; border-radius: 6px; background: #0f172a; color: #fff; cursor: pointer; margin: 4px 4px 4px 0; }
+    button.secondary { background: #fff; color: #0f172a; }
+    pre { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+    .box { border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <h2>Calendar SOA — OAuth2 Authorization Code + PKCE (ЛР5)</h2>
+  <div class="box">
+    <p><strong>1. Вхід через Keycloak:</strong></p>
+    <label><input type="checkbox" class="sc" value="calendar:read" checked /> calendar:read</label>
+    <label><input type="checkbox" class="sc" value="calendar:write" checked /> calendar:write</label>
+    <label><input type="checkbox" class="sc" value="nlp:parse" checked /> nlp:parse</label>
+    <label><input type="checkbox" class="sc" value="users:read" checked /> users:read</label>
+    <label><input type="checkbox" class="sc" value="notifications:read" checked /> notifications:read</label>
+    <br /><br />
+    <button onclick="loginKeycloak()">Увійти через Keycloak (Auth Code Flow)</button>
+    <button class="secondary" onclick="logoutLocal()">Очистити токен</button>
+    <p><small>Тестовий користувач: <code>yaroslav</code> / <code>kpi2026</code></small></p>
+  </div>
+
+  <div class="box">
+    <p><strong>2. Запити до захищених мікросервісів із JWT:</strong></p>
+    <button onclick="callApi('GET', '/api/events')">GET /api/events (calendar:read)</button>
+    <button onclick="callApi('POST', '/api/events', {user_id: 1, text: 'Зустріч ЛР5 завтра о 15:00', source: 'web'})">POST /api/events (calendar:write)</button>
+    <button onclick="callApi('GET', '/api/notifications')">GET /api/notifications (notifications:read)</button>
+    <button onclick="callApi('GET', '/api/users')">GET /api/users (users:read)</button>
+  </div>
+
+  <h3>Токен та відповідь API:</h3>
+  <pre id="out">Спочатку виконайте вхід через Keycloak...</pre>
+
+  <script>
+    const KC_BASE = "http://localhost:8180/realms/soa-calendar/protocol/openid-connect";
+    const CLIENT_ID = "calendar-web-client";
+    const REDIRECT_URI = "http://localhost:8080/";
+
+    function b64url(buf) {
+      return btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    async function sha256(str) {
+      const data = new TextEncoder().encode(str);
+      return await crypto.subtle.digest("SHA-256", data);
+    }
+
+    async function loginKeycloak() {
+      const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+      localStorage.setItem("pkce_verifier", verifier);
+      const challenge = b64url(await sha256(verifier));
+      const scopes = ["openid", "profile", ...Array.from(document.querySelectorAll(".sc:checked")).map(c => c.value)];
+      const params = new URLSearchParams({
+        client_id: CLIENT_ID,
+        response_type: "code",
+        redirect_uri: REDIRECT_URI,
+        scope: scopes.join(" "),
+        code_challenge: challenge,
+        code_challenge_method: "S256"
+      });
+      window.location.href = `${KC_BASE}/auth?${params.toString()}`;
+    }
+
+    function logoutLocal() {
+      localStorage.removeItem("access_token");
+      document.getElementById("out").textContent = "Токен видалено.";
+    }
+
+    async function handleCallback() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const code = urlParams.get("code");
+      if (!code) {
+        const saved = localStorage.getItem("access_token");
+        if (saved) showToken(saved);
+        return;
+      }
+      const verifier = localStorage.getItem("pkce_verifier");
+      const body = new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: CLIENT_ID,
+        code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier
+      });
+      const res = await fetch(`${KC_BASE}/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body
+      });
+      const data = await res.json();
+      if (data.access_token) {
+        localStorage.setItem("access_token", data.access_token);
+        window.history.replaceState({}, document.title, "/");
+        showToken(data.access_token);
+      } else {
+        document.getElementById("out").textContent = JSON.stringify(data, null, 2);
+      }
+    }
+
+    function showToken(jwt) {
+      const payload = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+      document.getElementById("out").textContent = "JWT Payload:\n" + JSON.stringify(payload, null, 2);
+    }
+
+    async function callApi(method, path, bodyData = null) {
+      const token = localStorage.getItem("access_token");
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(path, {
+        method,
+        headers,
+        body: bodyData ? JSON.stringify(bodyData) : null
+      });
+      const txt = await res.text();
+      document.getElementById("out").textContent = `HTTP ${res.status}\n` + txt;
+    }
+
+    handleCallback();
+  </script>
+</body>
+</html>

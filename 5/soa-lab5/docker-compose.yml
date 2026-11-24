@@ -1,0 +1,126 @@
+services:
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul-discovery
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - microservices-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    networks:
+      - microservices-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak-auth
+    command: start-dev --import-realm
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+      - KC_HOSTNAME_STRICT=false
+      - KC_HTTP_ENABLED=true
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./keycloak/realm-soa.json:/opt/keycloak/data/import/realm-soa.json:ro
+    networks:
+      - microservices-net
+
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./gateway/demo_auth.html:/usr/share/nginx/html/demo_auth.html:ro
+    depends_on:
+      - user-service
+      - nlp-service
+      - calendar-service
+      - notification-service
+    networks:
+      - microservices-net
+
+  user-service:
+    build: ./user_service
+    environment:
+      - CONSUL_HOST=consul
+      - KEYCLOAK_JWKS_URL=http://keycloak:8080/realms/soa-calendar/protocol/openid-connect/certs
+      - KEYCLOAK_ISSUER=http://localhost:8180/realms/soa-calendar
+    depends_on:
+      consul:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - microservices-net
+
+  nlp-service:
+    build: ./nlp_service
+    environment:
+      - CONSUL_HOST=consul
+      - KEYCLOAK_JWKS_URL=http://keycloak:8080/realms/soa-calendar/protocol/openid-connect/certs
+      - KEYCLOAK_ISSUER=http://localhost:8180/realms/soa-calendar
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    depends_on:
+      consul:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - microservices-net
+
+  calendar-service:
+    build: ./calendar_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+      - KEYCLOAK_JWKS_URL=http://keycloak:8080/realms/soa-calendar/protocol/openid-connect/certs
+      - KEYCLOAK_ISSUER=http://localhost:8180/realms/soa-calendar
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - microservices-net
+
+  notification-service:
+    build: ./notification_service
+    environment:
+      - CONSUL_HOST=consul
+      - RABBITMQ_HOST=rabbitmq
+      - KEYCLOAK_JWKS_URL=http://keycloak:8080/realms/soa-calendar/protocol/openid-connect/certs
+      - KEYCLOAK_ISSUER=http://localhost:8180/realms/soa-calendar
+    depends_on:
+      consul:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge

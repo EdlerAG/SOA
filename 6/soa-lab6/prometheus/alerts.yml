@@ -1,0 +1,38 @@
+groups:
+  - name: soa_calendar_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up{job="soa-microservices"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервіс {{ $labels.service }} ({{ $labels.instance_id }}) недоступний"
+          description: "Prometheus не отримує метрики від {{ $labels.instance }} протягом 15 секунд."
+
+      - alert: HighLatencyP99
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, service)) > 0.5
+        for: 20s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Висока затримка p99 на сервісі {{ $labels.service }}"
+          description: "99-й перцентиль затримки перевищив 500 мс (поточне значення: {{ $value }} с)."
+
+      - alert: HighErrorRate
+        expr: (sum(rate(http_requests_total{status=~"5.."}[1m])) by (service) / clamp_min(sum(rate(http_requests_total[1m])) by (service), 0.001)) > 0.05
+        for: 20s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Підвищений рівень 5xx помилок у {{ $labels.service }}"
+          description: "Частка помилок 5xx перевищує 5% протягом останніх 20 секунд."
+
+      - alert: QueueLagHigh
+        expr: max(queue_lag_seconds) > 5
+        for: 15s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Висока затримка обробки черги RabbitMQ"
+          description: "Відставання споживання повідомлень перевищило 5 секунд (поточне значення: {{ $value }} с)."
